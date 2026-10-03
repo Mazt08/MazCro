@@ -19,6 +19,24 @@ would otherwise click through dozens of times.
 - **Esc** stops a recording
 - Fully non-blocking: recording and playback run on background threads so the UI never freezes
 
+## Building a standalone EXE
+
+A prebuilt binary can be downloaded from the [Releases page](https://github.com/Mazt08/MazCro/releases).
+To build it yourself:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install pyinstaller
+.\.venv\Scripts\python.exe -m PyInstaller --clean --noconfirm MazCro.spec
+```
+
+The result is `dist\MazCro\MazCro.exe`. Keep the whole `dist\MazCro` folder together —
+the EXE needs the adjacent `_internal` directory containing the bundled interpreter
+and libraries.
+
+The `MazCro.spec` file explicitly lists `pynput`'s and `pyautogui`'s win32 backends as
+hidden imports, because both libraries choose their platform backend at runtime and
+would otherwise be stripped out of the build.
+
 ## Requirements
 
 - Windows (uses `pyautogui` and global input listeners)
@@ -48,12 +66,12 @@ Use **Save** to store a macro as JSON and **Load** to play it back later.
 
 ## How it works
 
-| Class | Responsibility |
-|---|---|
-| `Action` | Dataclass describing one recorded event plus its relative delay |
-| `Recorder` | `pynput` listener thread that converts raw input into `Action` objects |
-| `Player` | Worker thread that feeds actions to `pyautogui`, scaled by the speed factor |
-| `MacroApp` | Tkinter UI: buttons, action table, save/load, playback control |
+| Class      | Responsibility                                                              |
+| ---------- | --------------------------------------------------------------------------- |
+| `Action`   | Dataclass describing one recorded event plus its relative delay             |
+| `Recorder` | `pynput` listener thread that converts raw input into `Action` objects      |
+| `Player`   | Worker thread that feeds actions to `pyautogui`, scaled by the speed factor |
+| `MacroApp` | Tkinter UI: buttons, action table, save/load, playback control              |
 
 Delays are stored **relative to the previous event**, so playback timing scales
 cleanly with the speed multiplier and macros stay portable across machines.
