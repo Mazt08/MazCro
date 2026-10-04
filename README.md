@@ -165,6 +165,24 @@ per keystroke. Mouse movement is captured but you can turn it off with the
 There is a short 800 ms delay before playback begins so you can switch to the
 target window. Use **Preview** first to see the action list without moving the mouse.
 
+### Downloading the Windows application
+
+The Windows executable is intentionally not committed to the source tree. Each
+version is built by GitHub Actions and published on the
+[Releases page](https://github.com/Mazt08/MazCro/releases). Download the
+`MazCro-*.zip` asset, extract it, and run `MazCro.exe`; Python is not required.
+The matching `MazCro.sha256` file can be used to verify the download.
+
+To publish a new release as a maintainer, push a version tag:
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow builds the single-file executable, checks that it exists, packages
+it with its SHA256 checksum, and attaches both files to the GitHub release.
+
 ### Alt+Tab auto-trigger
 
 Tick **Auto-trigger on Alt+Tab**. A background thread watches the foreground

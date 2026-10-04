@@ -1,3 +1,6 @@
+# Exclude .gitignore from version control
+!.gitignore
+
 # Virtual environments
 .venv/
 venv/
@@ -34,3 +37,4 @@ Thumbs.db
 # Exported macros
 *.json
 !example.json
+
