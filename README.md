@@ -2,6 +2,17 @@
 
 A Windows macro recorder and player with a graphical UI, written in Python.
 
+## Download for Windows
+
+**Do not use GitHub's `Code > Download ZIP` for the ready-to-run app.** That
+download contains source code only. Download the executable package from the
+[MazCro v1.0.0 Release](https://github.com/Mazt08/MazCro/releases/tag/v1.0.0),
+then extract `MazCro-*.zip` and double-click `MazCro.exe`. Python is not
+required.
+
+If Windows SmartScreen appears, choose **More info** and **Run anyway** only if
+you trust this copy and have verified the published `MazCro.sha256` checksum.
+
 MazCro records your mouse and keyboard activity against a **specific target
 application**, then replays it — either on demand, via a hotkey, or automatically
 the moment you Alt+Tab back to that app.
