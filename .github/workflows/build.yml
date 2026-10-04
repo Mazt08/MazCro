@@ -30,31 +30,31 @@ jobs:
 
       - name: Build single-file EXE
         run: |
-          python -m PyInstaller --clean --noconfirm MazCro-onefile.spec
+          python -m PyInstaller --clean --noconfirm --onefile --noconsole --name "macro_script" macro_script.py
 
       - name: Verify EXE exists
         run: |
-          if (-not (Test-Path dist\MazCro.exe)) { throw "MazCro.exe was not produced" }
-          Get-Item dist\MazCro.exe | Select-Object Name, Length
+          if (-not (Test-Path dist\macro_script.exe)) { throw "macro_script.exe was not produced" }
+          Get-Item dist\macro_script.exe | Select-Object Name, Length
 
       - name: Package ZIP
         run: |
-          Compress-Archive -Path dist\MazCro.exe -DestinationPath MazCro-${{ github.ref_name }}.zip
-          Get-FileHash dist\MazCro.exe -Algorithm SHA256 | Out-File MazCro.sha256 -Encoding ascii
+          Compress-Archive -Path dist\macro_script.exe -DestinationPath macro_script-${{ github.ref_name }}.zip
+          Get-FileHash dist\macro_script.exe -Algorithm SHA256 | Out-File macro_script.sha256 -Encoding ascii
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MazCro-windows
+          name: macro_script-windows
           path: |
-            MazCro-*.zip
-            MazCro.sha256
+            macro_script-*.zip
+            macro_script.sha256
 
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            MazCro-*.zip
-            MazCro.sha256
+            macro_script-*.zip
+            macro_script.sha256
           generate_release_notes: true

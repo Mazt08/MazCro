@@ -1,6 +1,3 @@
-# Exclude .gitignore from version control
-!.gitignore
-
 # Virtual environments
 .venv/
 venv/
@@ -14,13 +11,15 @@ __pycache__/
 
 # Packaging / build
 build/
-dist/
-!dist/
-dist/*
-!dist/MazCro.exe
 *.egg-info/
 .eggs/
-*.spec.bak
+
+# PyInstaller spec (auto-generated)
+macro_script.spec
+
+# dist — allow the exe, ignore everything else
+dist/*
+!dist/macro_script.exe
 
 # Test / coverage
 .pytest_cache/
