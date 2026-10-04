@@ -15,6 +15,9 @@ __pycache__/
 # Packaging / build
 build/
 dist/
+!dist/
+dist/*
+!dist/MazCro.exe
 *.egg-info/
 .eggs/
 *.spec.bak
@@ -37,4 +40,3 @@ Thumbs.db
 # Exported macros
 *.json
 !example.json
-
