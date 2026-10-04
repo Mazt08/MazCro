@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import threading
 import time
+import string
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -58,6 +59,60 @@ KEY_ALIASES: dict[str, str] = {
     "apps": "menu",
 }
 
+#: Modifier spellings a ``key_press`` action may carry. Anything else is
+#: rejected rather than silently pressed, because an unknown modifier name
+#: would otherwise leave a key stuck down.
+MODIFIER_KEYS: frozenset[str] = frozenset(
+    {"ctrl", "shift", "alt", "win", "command", "cmd", "winleft", "winright"}
+)
+
+#: Punctuation and symbols offered in the key dropdown and accepted by
+#: playback. pyautogui lists these as valid key names, so they can be sent
+#: directly -- but note that on a US layout most of them are Shift+<digit>
+#: rather than a key of their own. They are stored exactly as written; see
+#: :func:`warn_about_layout_symbols`.
+SYMBOL_KEYS: tuple[str, ...] = tuple(
+    "`~!@#$%^&*()-_=+[]{}|;:'\",.<>/?\\"
+)
+
+#: Numpad keys. pyautogui spells these without an underscore (``num5``,
+#: ``numlock``), while pynput uses ``num_5``; :func:`_normalize_numpad` bridges
+#: the two so a recorded macro replays regardless of which produced it.
+NUMPAD_KEYS: tuple[str, ...] = (
+    "num0", "num1", "num2", "num3", "num4", "num5",
+    "num6", "num7", "num8", "num9", "numlock",
+    "add", "subtract", "multiply", "divide", "decimal",
+)
+
+#: Alternate spellings normalised to the names pyautogui expects.
+EXTRA_KEY_ALIASES: dict[str, str] = {
+    "num_0": "num0", "num_1": "num1", "num_2": "num2", "num_3": "num3",
+    "num_4": "num4", "num_5": "num5", "num_6": "num6", "num_7": "num7",
+    "num_8": "num8", "num_9": "num9", "num_lock": "numlock",
+    "decimal_sep": "decimal",
+    "pgdn": "pagedown", "pgup": "pageup", "pgdown": "pagedown",
+    "page_up": "pageup", "page_down": "pagedown",
+    "caps": "caps_lock", "prtsc": "print_screen",
+    "menu_key": "menu", "space_bar": "space",
+}
+
+
+#: Human-readable name for each action kind, used by the preview table.
+TYPE_LABELS: dict[str, str] = {
+    "click": "Mouse Click",
+    "mouse_click": "Mouse Click",
+    "double_click": "Double Click",
+    "move": "Mouse Move",
+    "scroll": "Scroll",
+    "key": "Key Press",
+    "key_press": "Key Press",
+    "hold_key": "Key Press",
+    "type": "Text Input",
+    "text_input": "Text Input",
+    "wait": "Wait",
+    "screenshot": "Screenshot",
+}
+
 
 def _import_input() -> tuple[Any, Any] | None:
     """Import pyautogui and pynput lazily, returning None if unavailable."""
@@ -85,6 +140,58 @@ def valid_key_names() -> set[str]:
     except Exception:  # noqa: BLE001
         log_warning("could not enumerate pynput key names")
         return set()
+
+
+def available_key_names() -> list[str]:
+    """Return a sorted, GUI-friendly list of key names.
+
+    Combines pynput's ``Key`` enum with single printable characters and the
+    documented aliases, so the Add Action dropdown only ever offers keys that
+    playback will accept.
+    """
+    names = set(valid_key_names())
+    if not names:
+        log_warning("could not enumerate pynput key names; using the built-in list")
+    names |= set(KEY_ALIASES)
+    names |= set(character for character in string.ascii_lowercase)
+    names |= set(string.digits)
+    names |= {
+        "space", "enter", "tab", "backspace", "escape", "delete",
+        "home", "end", "pageup", "pagedown", "up", "down", "left", "right",
+    }
+    names |= {f"f{n}" for n in range(1, 13)}
+    # Symbols and numpad keys round out the dropdown.
+    names |= set(SYMBOL_KEYS)
+    names |= set(NUMPAD_KEYS)
+    names |= {"`"}
+    return sorted(names)
+
+
+def warn_about_layout_symbols(action: Action) -> None:
+    """Log a one-off note when a symbol key is sent as a bare press.
+
+    Symbols are stored and replayed exactly as written. On a US layout most of
+    them (``!``, ``@``, ``#``...) are really Shift+<digit>, so a bare press may
+    produce nothing. This is a log-only heads-up: the user asked for symbols
+    to be sent literally rather than rewritten into modifier combos.
+    """
+    if action.kind not in ("key", "key_press", "hold_key"):
+        return
+    name = action.key
+    if len(name) == 1 and name in SYMBOL_KEYS:
+        log_warning(
+            f"symbol key {name!r} is being sent as a bare press; on a US layout "
+            f"it is produced by Shift+<digit>. Add Shift explicitly if nothing appears."
+        )
+
+
+@dataclass
+class _PassResult:
+    """How one pass through the action list ended."""
+
+    completed: int
+    aborted: str = ""
+    skipped: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -116,6 +223,8 @@ class Player(threading.Thread):
         on_error_policy: str = "stop",
         require_target_window: bool = True,
         refocus: bool = True,
+        loop_count: int = 1,
+        loop_interval: float = 0.0,
     ) -> None:
         super().__init__(name="MazCroPlayer", daemon=True)
         self.macro = macro
@@ -127,6 +236,10 @@ class Player(threading.Thread):
         self.on_error_policy = on_error_policy if on_error_policy in ("stop", "skip") else "stop"
         self.require_target_window = require_target_window
         self.refocus = refocus
+        #: 1 means "play once"; 0 means "repeat until stopped".
+        self.loop_count = max(int(loop_count), 0)
+        #: Seconds to wait between loop repetitions.
+        self.loop_interval = max(float(loop_interval), 0.0)
 
         self._stop_event = threading.Event()
         self._screen: ScreenInfo = get_screen_info()
@@ -176,6 +289,18 @@ class Player(threading.Thread):
             return
         pyautogui = inputs[0]
 
+        # Unresolved ${name} placeholders would be typed literally into the
+        # target application, so fail before touching the screen.
+        available = set(self.macro.variable_map()) | set(self.variable_overrides)
+        missing = self.macro.missing_variables(available)
+        if missing:
+            detail = "no value for " + ", ".join(f"${{{n}}}" for n in missing)
+            result.message = detail
+            result.errors.append(detail)
+            self._log(f"ABORT: {detail}")
+            self._finish(result)
+            return
+
         # ---- pre-flight validation ------------------------------------
         if self.require_target_window:
             ok, detail = self._preflight()
@@ -187,11 +312,66 @@ class Player(threading.Thread):
                 return
             self._log(f"pre-flight ok: {detail}")
 
+        repetitions = self.loop_count if self.loop_count else None
+        passes = 0
+        aborted = ""
+        while repetitions is None or passes < repetitions:
+            if passes > 0:
+                self._log(f"loop {passes} of {repetitions or '∞'} done, repeating...")
+                if self.loop_interval > 0 and self._wait(self.loop_interval):
+                    aborted = "stopped by user"
+                    break
+            passes += 1
+            pass_result = self._run_once(actions, pyautogui, started, passes)
+            completed += pass_result.completed
+            errors.extend(pass_result.skipped)
+            if pass_result.aborted:
+                aborted = pass_result.aborted
+                break
+
+        elapsed = time.monotonic() - started
+        result.completed = completed
+        result.total = total if repetitions in (None, 1) else total * passes
+        result.errors = errors
+        result.duration = elapsed
+
+        if aborted:
+            result.ok = False
+            result.message = aborted
+        elif errors:
+            result.ok = True
+            result.message = f"completed with {len(errors)} skipped action(s)"
+        else:
+            result.ok = True
+            result.message = "completed"
+            if repetitions not in (None, 1):
+                result.message += f" ({passes}x)"
+
+        self._finish(result)
+
+    def _run_once(
+        self, actions: list[Action], pyautogui: Any, started: float, pass_number: int
+    ) -> "_PassResult":
+        """Execute the action list once, returning how that pass ended.
+
+        Split out of :meth:`run` so looping re-enters a clean, testable unit
+        rather than duplicating the whole action loop inside a ``while``.
+        """
+        aborted = ""
+        skipped: list[str] = []
+        completed = 0
+
         self._screen = get_screen_info()
-        deadline = started + max(self.macro.expected_duration(self.speed) * TIMEOUT_FACTOR, TIMEOUT_FLOOR)
+        # Each pass gets its own watchdog budget measured from the moment it
+        # began, so a long loop never trips a whole-run time limit and a single
+        # slow pass still gets aborted.
+        pass_started = time.monotonic()
+        budget = max(
+            self.macro.expected_duration(self.speed) * TIMEOUT_FACTOR, TIMEOUT_FLOOR
+        )
+        deadline = pass_started + budget
         between = self.between_action_ms / 1000.0
 
-        aborted = ""
         for index, action in enumerate(actions, start=1):
             if self._stop_event.is_set():
                 aborted = "stopped by user"
@@ -220,7 +400,7 @@ class Player(threading.Thread):
                 completed += 1
             except Exception as exc:  # noqa: BLE001
                 message = f"action {index} ({action.kind}) failed: {exc}"
-                errors.append(message)
+                skipped.append(message)
                 log_exception(f"playback failure in macro {self.macro.name!r}: {message}")
                 self._log(f"ERROR: {message}")
                 if self.on_error_policy == "stop":
@@ -231,55 +411,49 @@ class Player(threading.Thread):
                     aborted = "stopped by user"
                     break
 
-        elapsed = time.monotonic() - started
-        result.completed = completed
-        result.errors = errors
-        result.duration = elapsed
-
-        if aborted:
-            result.ok = False
-            result.message = aborted
-        elif errors:
-            result.ok = True
-            result.message = f"completed with {len(errors)} skipped action(s)"
-        else:
-            result.ok = True
-            result.message = "completed"
-
-        self._finish(result)
+        return _PassResult(completed=completed, aborted=aborted, skipped=skipped)
 
     # ------------------------------------------------------------ validation
     def _preflight(self) -> tuple[bool, str]:
-        """Check the target window exists and the macro is sane."""
-        target = self.macro.target
-        if not (target.process_name or target.title or target.title_pattern):
+        """Check that at least one target window exists and the macro is sane."""
+        targets = self.macro.all_targets()
+        if not any(
+            t.process_name or t.title or t.title_pattern for t in targets
+        ):
             return True, "no target window required for this macro"
 
-        win = find_window(target)
-        if win is None:
-            return False, (
-                f"target application {target.process_name or target.title!r} is not running"
-            )
-        if win.handle and not window_exists(win.handle):
-            return False, "target window handle is no longer valid"
+        labels: list[str] = []
+        for target in targets:
+            if not (target.process_name or target.title or target.title_pattern):
+                continue
+            win = find_window(target)
+            if win is None:
+                continue
+            if win.handle and not window_exists(win.handle):
+                continue
+            labels.append(win.process_label)
+            if self.refocus and not _is_foreground(win.handle):
+                focus_window_safe(win.handle)
+            if len(labels) == 1 and not self.macro.extra_targets:
+                return True, f"target window ready ({win.process_label})"
 
-        if self.refocus and not _is_foreground(win.handle):
-            focus_window_safe(win.handle)
-
-        return True, f"target window ready ({win.process_label})"
+        if not labels:
+            wanted = targets[0].process_name or targets[0].title
+            return False, f"target application {wanted!r} is not running"
+        return True, "target window ready (" + ", ".join(labels[:3]) + ")"
 
     def _target_still_open(self) -> bool:
-        """Re-check the target window during playback."""
-        target = self.macro.target
-        if not (target.process_name or target.title or target.title_pattern):
-            return True
-        win = find_window(target)
-        if win is None:
-            return False
-        # Update the cached handle: windows get recreated (dialogs, tabs).
-        if win.handle and win.handle != target.handle:
-            target.handle = win.handle
-        return True
+        """Re-check that at least one target window is still open."""
+        for target in self.macro.all_targets():
+            if not (target.process_name or target.title or target.title_pattern):
+                return True
+            win = find_window(target)
+            if win is not None:
+                # Update the cached handle: windows get recreated (dialogs, tabs).
+                if win.handle and win.handle != target.handle:
+                    target.handle = win.handle
+                return True
+        return False
 
     def _validate_position(self, action: Action) -> tuple[int, int]:
         """Bounds-check an action's coordinates against the virtual desktop."""
@@ -309,7 +483,17 @@ class Player(threading.Thread):
 
         if lowered in KEY_ALIASES:
             return KEY_ALIASES[lowered]
+        numpad = EXTRA_KEY_ALIASES.get(lowered)
+        if numpad is not None:
+            return numpad
+        # A single printable character is not in pynput's Key enum (which only
+        # lists named keys), but it is a perfectly valid thing to press, and the
+        # Add Action key dropdown offers exactly these.
+        if len(lowered) == 1 and lowered.isprintable():
+            return lowered
         if lowered in self._keys or lowered in NON_TYPEABLE_KEYS:
+            return lowered
+        if lowered in SYMBOL_KEYS or lowered in NUMPAD_KEYS:
             return lowered
         raise ValueError(f"unknown key name {key!r}")
 
@@ -329,7 +513,7 @@ class Player(threading.Thread):
             else:
                 pyautogui.moveTo(x, y)
 
-        elif kind == "click":
+        elif kind in ("click", "mouse_click"):
             x, y = self._validate_position(action)
             button = action.button if action.button in ("left", "right", "middle") else "left"
             hold = max(action.hold_time, 0) / 1000.0
@@ -352,6 +536,9 @@ class Player(threading.Thread):
             interval = min(max(0.001, 0.01 / self.speed), 0.05)
             pyautogui.typewrite(action.text, interval=interval)
 
+        elif kind == "text_input":
+            self._type_text(action, pyautogui)
+
         elif kind == "key":
             name = self._validate_key(action.key)
             hold = max(action.hold_time, 0) / 1000.0
@@ -361,6 +548,9 @@ class Player(threading.Thread):
                 pyautogui.keyUp(name)
             else:
                 pyautogui.press(name)
+
+        elif kind == "key_press":
+            self._press_combo(action, pyautogui)
 
         elif kind == "hold_key":
             name = self._validate_key(action.key)
@@ -382,6 +572,67 @@ class Player(threading.Thread):
 
         else:
             raise ValueError(f"unsupported action type {kind!r}")
+
+    def _type_text(self, action: Action, pyautogui: Any) -> None:
+        """Type ``action.text`` one character at a time, pausing between keys.
+
+        Typing character by character (rather than one bulk ``typewrite``) is
+        what makes the action replay faithfully: applications with key-driven
+        autocomplete need to see the real inter-key gaps, and a stop request
+        can interrupt between characters instead of after the whole string.
+
+        Newlines are sent as ``enter`` presses because pyautogui's typewrite
+        emits them inconsistently across platforms.
+        """
+        text = action.text
+        if not text:
+            raise ValueError("text_input action has no text")
+
+        interval = max(action.delay_per_char, 0) / 1000.0 / self.speed
+        for index, char in enumerate(text):
+            if self._stop_event.is_set():
+                return
+            if index:
+                if self._wait(interval):
+                    return
+            if char == "\n":
+                pyautogui.press("enter")
+            elif char == "\t":
+                pyautogui.press("tab")
+            else:
+                pyautogui.typewrite(char)
+
+    def _press_combo(self, action: Action, pyautogui: Any) -> None:
+        """Press modifiers plus the main key, hold, then release everything.
+
+        Release happens in a ``finally`` block in reverse order: if the wait is
+        interrupted, or the key raises, the modifiers must still come back up or
+        the keyboard stays logically stuck for the rest of the session.
+        """
+        key_name = self._validate_key(action.key)
+        warn_about_layout_symbols(action)
+
+        pressed: list[str] = []
+        try:
+            for modifier in action.modifiers:
+                name = modifier.strip().lower()
+                if name not in MODIFIER_KEYS:
+                    raise ValueError(f"unknown modifier {modifier!r}")
+                resolved = KEY_ALIASES.get(name, name)
+                pyautogui.keyDown(resolved)
+                pressed.append(resolved)
+
+            hold = max(action.hold_time, 0) / 1000.0 / self.speed
+            pyautogui.keyDown(key_name)
+            pressed.append(key_name)
+            if hold:
+                self._wait(hold)
+        finally:
+            for name in reversed(pressed):
+                try:
+                    pyautogui.keyUp(name)
+                except Exception:  # noqa: BLE001
+                    log_exception(f"could not release {name!r}")
 
     def _take_screenshot(self, action: Action, pyautogui: Any) -> None:
         """Capture the screen to ``action.path`` or the macro folder."""
@@ -473,10 +724,22 @@ def dry_run(macro: Macro, overrides: dict[str, str] | None = None) -> list[str]:
     lines: list[str] = []
     merged = macro.variable_map()
     merged.update(overrides or {})
+    lines.append(f"{'#':>3}  {'Type':<12} {'Detail':<44} {'Sleep':>6} {'Hold':>6}")
+    lines.append("-" * 76)
     for index, action in enumerate(macro.actions, start=1):
         resolved = Action.from_dict(action.to_dict()).substitute(merged)
-        prefix = f"{index:>3}. "
-        if resolved.delay:
-            prefix += f"(+{resolved.delay:.2f}s) "
-        lines.append(prefix + resolved.describe())
+        label = TYPE_LABELS.get(resolved.kind, resolved.kind)
+        hold = (
+            f"{resolved.hold_time}"
+            if resolved.kind in ("click", "mouse_click", "key", "key_press",
+                                 "hold_key", "double_click")
+            else "-"
+        )
+        detail = resolved.describe()
+        if len(detail) > 44:
+            detail = detail[:41] + "..."
+        lines.append(
+            f"{index:>3}  {label:<12} {detail:<44} "
+            f"{int(round(resolved.delay * 1000)):>6} {hold:>6}"
+        )
     return lines

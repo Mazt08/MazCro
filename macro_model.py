@@ -45,15 +45,18 @@ class Action:
 
     ``kind`` is one of:
 
-    ``wait``        -- pause for ``duration`` seconds
-    ``click``       -- click at (x, y); ``button`` is left/right/middle
-    ``double_click``-- two clicks at (x, y)
-    ``move``        -- move the pointer to (x, y) over ``duration`` seconds
-    ``type``        -- type ``text`` (with ``${var}`` substitution)
-    ``key``         -- tap ``key`` once
-    ``hold_key``    -- hold ``key`` down for ``hold_time`` milliseconds
-    ``scroll``      -- scroll ``amount`` clicks vertically at (x, y)
-    ``screenshot`` -- capture the screen to ``path``
+    ``wait``         -- pause for ``duration`` seconds
+    ``click``        -- click at (x, y); ``button`` is left/right/middle
+    ``mouse_click``  -- alias of ``click`` used by the manual Add Action panel
+    ``double_click`` -- two clicks at (x, y)
+    ``move``         -- move the pointer to (x, y) over ``duration`` seconds
+    ``type``         -- type ``text`` (with ``${var}`` substitution)
+    ``text_input``   -- type ``text`` with ``delay_per_char`` ms between chars
+    ``key``          -- tap ``key`` once
+    ``hold_key``     -- hold ``key`` down for ``hold_time`` milliseconds
+    ``key_press``    -- press ``key`` with ``modifiers`` held for ``hold_time``
+    ``scroll``       -- scroll ``amount`` clicks vertically at (x, y)
+    ``screenshot``  -- capture the screen to ``path``
 
     ``delay`` is the recorded gap *before* this action, in seconds. Playback
     divides it by the speed factor, so a 2.0x macro runs twice as fast.
@@ -70,10 +73,14 @@ class Action:
     hold_time: int = 50
     amount: int = 0
     path: str = ""
+    #: Modifier keys held down around a ``key_press`` (ctrl/shift/alt/win).
+    modifiers: list[str] = field(default_factory=list)
+    #: Milliseconds between characters for ``text_input``.
+    delay_per_char: int = 50
 
     #: Kinds that move the pointer and therefore need bounds checking.
     POSITIONAL: tuple[str, ...] = field(
-        default=("click", "double_click", "move", "scroll"),
+        default=("click", "mouse_click", "double_click", "move", "scroll"),
         init=False,
         repr=False,
         compare=False,
@@ -90,16 +97,20 @@ class Action:
         if self.kind in self.POSITIONAL or self.kind == "screenshot":
             data["x"] = self.x
             data["y"] = self.y
-        if self.kind in ("click", "double_click"):
+        if self.kind in ("click", "mouse_click", "double_click"):
             data["button"] = self.button
-        if self.kind in ("click", "key", "hold_key", "double_click"):
+        if self.kind in ("click", "mouse_click", "key", "hold_key", "key_press", "double_click"):
             data["hold_time"] = int(self.hold_time)
         if self.kind in ("move", "wait"):
             data["duration"] = round(float(self.duration), 4)
-        if self.kind == "type":
+        if self.kind in ("type", "text_input"):
             data["text"] = self.text
-        if self.kind in ("key", "hold_key"):
+        if self.kind in ("key", "hold_key", "key_press"):
             data["key"] = self.key
+        if self.kind == "key_press":
+            data["modifiers"] = list(self.modifiers)
+        if self.kind == "text_input":
+            data["delay_per_char"] = int(self.delay_per_char)
         if self.kind == "scroll":
             data["amount"] = int(self.amount)
         if self.kind == "screenshot":
@@ -112,9 +123,22 @@ class Action:
         kind = str(raw.get("type", raw.get("kind", ""))).strip().lower()
         if not kind:
             raise ValueError("action is missing a 'type' field")
+        # "delay" is MazCro's own unit (seconds). "sleep_before" is the unit used
+        # by the hand-authored schema, where every delay is milliseconds. Accept
+        # both so macros written by hand load without conversion.
+        if raw.get("sleep_before") is not None:
+            delay = float(raw.get("sleep_before", 0) or 0) / 1000.0
+        else:
+            delay = float(raw.get("delay", 0.0) or 0.0)
+
+        raw_modifiers = raw.get("modifiers", []) or []
+        if isinstance(raw_modifiers, str):
+            raw_modifiers = [raw_modifiers]
+        modifiers = [str(m).strip().lower() for m in raw_modifiers if str(m).strip()]
+
         return cls(
             kind=kind,
-            delay=float(raw.get("delay", 0.0) or 0.0),
+            delay=delay,
             x=int(raw.get("x", 0) or 0),
             y=int(raw.get("y", 0) or 0),
             button=str(raw.get("button", "left") or "left"),
@@ -124,6 +148,8 @@ class Action:
             hold_time=int(raw.get("hold_time", 50) or 50),
             amount=int(raw.get("amount", 0) or 0),
             path=str(raw.get("path", "") or ""),
+            modifiers=modifiers,
+            delay_per_char=int(raw.get("delay_per_char", 50) or 50),
         )
 
     def substitute(self, variables: dict[str, str]) -> "Action":
@@ -132,18 +158,24 @@ class Action:
         Unknown placeholders are left untouched so the user can see what is
         missing rather than silently losing text.
         """
-        if self.kind != "type" or "${" not in self.text:
+        if self.kind not in ("type", "text_input") or "${" not in self.text:
             return self
         self.text = VARIABLE_PATTERN.sub(
             lambda m: variables.get(m.group(1), m.group(0)), self.text
         )
         return self
 
+    def placeholders(self) -> list[str]:
+        """Return the ``${name}`` names this action refers to, in order."""
+        if self.kind not in ("type", "text_input") or "${" not in self.text:
+            return []
+        return [m.group(1) for m in VARIABLE_PATTERN.finditer(self.text)]
+
     def describe(self) -> str:
         """Return a short human-readable summary for the GUI list."""
         if self.kind == "wait":
             return f"Wait {self.duration:.2f}s"
-        if self.kind == "click":
+        if self.kind in ("click", "mouse_click"):
             return f"Click {self.button} ({self.x}, {self.y}) hold {self.hold_time}ms"
         if self.kind == "double_click":
             return f"Double click ({self.x}, {self.y})"
@@ -152,10 +184,16 @@ class Action:
         if self.kind == "type":
             preview = self.text if len(self.text) <= 40 else self.text[:37] + "..."
             return f"Type {preview!r}"
+        if self.kind == "text_input":
+            preview = self.text if len(self.text) <= 32 else self.text[:29] + "..."
+            return f"Text {preview!r} ({self.delay_per_char}ms/char)"
         if self.kind == "key":
             return f"Key {self.key}"
         if self.kind == "hold_key":
             return f"Hold {self.key} for {self.hold_time}ms"
+        if self.kind == "key_press":
+            combo = "+".join([*self.modifiers, self.key])
+            return f"Key {combo} hold {self.hold_time}ms"
         if self.kind == "scroll":
             return f"Scroll {self.amount} at ({self.x}, {self.y})"
         if self.kind == "screenshot":
@@ -218,6 +256,9 @@ class Macro:
 
     name: str = "Untitled macro"
     target: WindowTarget = field(default_factory=WindowTarget)
+    #: Additional accepted target windows. Playback is allowed if ANY of
+    #: these (or the primary ``target``) is open and matches.
+    extra_targets: list[WindowTarget] = field(default_factory=list)
     actions: list[Action] = field(default_factory=list)
     variables: list[Variable] = field(default_factory=list)
     created: str = field(default_factory=now_iso)
@@ -260,9 +301,11 @@ class Macro:
                 total += action.duration
             elif action.kind == "move":
                 total += action.duration
-            elif action.kind == "hold_key":
+            elif action.kind in ("hold_key", "key_press"):
                 total += action.hold_time / 1000.0
-            elif action.kind in ("type", "click"):
+            elif action.kind == "text_input":
+                total += len(action.text) * action.delay_per_char / 1000.0
+            elif action.kind in ("type", "click", "mouse_click"):
                 # Rough but bounded estimate for per-character / per-click cost.
                 total += len(action.text) * 0.01 if action.kind == "type" else 0.05
         return total / factor
@@ -276,6 +319,7 @@ class Macro:
             "last_modified": self.last_modified,
             "playback_speed": round(self.playback_speed, 3),
             "window": self.target.to_dict(),
+            "extra_windows": [w.to_dict() for w in self.extra_targets],
             "variables": {v.name: v.value for v in self.variables},
             "variable_list": [v.to_dict() for v in self.variables],
             "actions": [a.to_dict() for a in self.actions],
@@ -316,6 +360,11 @@ class Macro:
         target_title = str(raw.get("target_window_title", "") or "")
         target_pattern = str(raw.get("target_window_title_pattern", "") or "")
 
+        extras: list[WindowTarget] = []
+        for entry in raw.get("extra_windows", []) or []:
+            if isinstance(entry, dict):
+                extras.append(WindowTarget.from_dict(entry))
+
         return cls(
             name=name,
             target=WindowTarget(
@@ -323,12 +372,33 @@ class Macro:
                 title=target_title,
                 title_pattern=target_pattern,
             ),
+            extra_targets=extras,
             actions=actions,
             variables=variables,
             created=str(raw.get("created", "") or now_iso()),
             last_modified=str(raw.get("last_modified", "") or now_iso()),
             playback_speed=float(raw.get("playback_speed", 1.0) or 1.0),
         )
+
+    def all_targets(self) -> list[WindowTarget]:
+        """Return the primary target plus any extra accepted windows."""
+        targets = [self.target]
+        targets.extend(t for t in self.extra_targets if t is not self.target)
+        return targets
+
+    def missing_variables(self, known: set[str] | None = None) -> list[str]:
+        """Return the ``${name}`` placeholders with no matching variable.
+
+        Playback calls this before starting so an unresolved placeholder is
+        reported to the user instead of being typed literally into a form.
+        """
+        available = set(known) if known is not None else set(self.variable_map())
+        missing: list[str] = []
+        for action in self.actions:
+            for name in action.placeholders():
+                if name not in available and name not in missing:
+                    missing.append(name)
+        return missing
 
     def resolved_actions(self, overrides: dict[str, str] | None = None) -> list[Action]:
         """Return copies of the actions with variables substituted.

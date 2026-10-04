@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import ctypes
 import platform
-import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -31,8 +30,6 @@ IS_WINDOWS = platform.system() == "Windows"
 
 #: How often the foreground-monitor thread polls, in seconds.
 POLL_INTERVAL = 0.15
-#: Budget for the tasklist call that maps pids to executable names.
-PROCESS_LOOKUP_TIMEOUT = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -204,8 +201,33 @@ def _process_id(hwnd: int) -> int:
         return 0
 
 
+if IS_WINDOWS:
+    # Toolhelp32 is the in-process replacement for shelling out to ``tasklist``.
+    # ``tasklist`` is a console-subsystem binary, so every call popped a black
+    # command window over the app; this API needs no child process at all.
+    _TH32CS_SNAPPROCESS = 0x00000002
+    _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class _PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_ulong),
+            ("cntUsage", ctypes.c_ulong),
+            ("th32ProcessID", ctypes.c_ulong),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", ctypes.c_ulong),
+            ("cntThreads", ctypes.c_ulong),
+            ("th32ParentProcessID", ctypes.c_ulong),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_ulong),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+
 def _process_names() -> dict[int, str]:
-    """Map pid -> executable name using a single ``tasklist`` call.
+    """Map pid -> executable name for every running process.
+
+    Uses the Toolhelp32 snapshot API directly rather than running ``tasklist``,
+    which avoided spawning a console window every refresh.
 
     Returns an empty dict on failure so callers can fall back to the previous
     good result instead of losing process names entirely.
@@ -213,32 +235,31 @@ def _process_names() -> dict[int, str]:
     if not IS_WINDOWS:
         return {}
     try:
-        completed = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            timeout=PROCESS_LOOKUP_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        log_warning(f"tasklist timed out after {PROCESS_LOOKUP_TIMEOUT:.0f}s")
-        return {}
-    except (subprocess.SubprocessError, OSError) as exc:
-        log_warning(f"tasklist failed: {exc}")
-        return {}
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        entry = _PROCESSENTRY32()
+        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32)
 
-    mapping: dict[int, str] = {}
-    for line in completed.stdout.splitlines():
-        parts = [p.strip('" ') for p in line.split('","')]
-        if len(parts) < 2:
-            continue
-        name = parts[0]
-        raw_pid = parts[1].replace(",", "")
+        snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPPROCESS, 0)
+        if not snapshot or snapshot == _INVALID_HANDLE_VALUE:
+            log_warning("CreateToolhelp32Snapshot failed")
+            return {}
+
+        mapping: dict[int, str] = {}
         try:
-            mapping[int(raw_pid)] = name
-        except ValueError:
-            continue
-    return mapping
+            ok = kernel32.Process32First(snapshot, ctypes.byref(entry))
+            while ok:
+                name = entry.szExeFile.decode("mbcs", errors="replace").strip()
+                if name:
+                    mapping[int(entry.th32ProcessID)] = name
+                entry = _PROCESSENTRY32()
+                entry.dwSize = ctypes.sizeof(_PROCESSENTRY32)
+                ok = kernel32.Process32Next(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        return mapping
+    except Exception:  # noqa: BLE001
+        log_exception("process enumeration failed")
+        return {}
 
 
 class _ProcessCache:
@@ -246,8 +267,7 @@ class _ProcessCache:
 
     Enumerating processes is by far the most expensive part of refreshing the
     application list, and the GUI does that every second. Without a cache the
-    ``tasklist`` call runs continuously and eventually starts timing out on a
-    busy machine, which silently degrades the dropdown to empty process names.
+    process walk runs continuously, which is wasted work on a busy machine.
 
     The trade-off is that closing and reopening an app is noticed within
     ``ttl`` seconds rather than instantly, which is imperceptible at a 1 Hz
@@ -267,7 +287,7 @@ class _ProcessCache:
 
         After a failed lookup the cache keeps serving the last good data and
         suppresses further attempts for ``_failure_backoff`` seconds, so a
-        machine where ``tasklist`` is slow does not stall the UI thread.
+        transient failure does not stall the UI thread.
         """
         with self._lock:
             now = time.monotonic()

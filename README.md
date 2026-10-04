@@ -24,14 +24,73 @@ the moment you Alt+Tab back to that app.
 | Action | Fields | Notes |
 | --- | --- | --- |
 | `wait` | `duration` | explicit pause, in seconds |
-| `click` | `x`, `y`, `button`, `hold_time` | hold is in milliseconds |
+| `click` / `mouse_click` | `x`, `y`, `button`, `hold_time` | hold is in milliseconds |
 | `double_click` | `x`, `y`, `button` | |
 | `move` | `x`, `y`, `duration` | glides over `duration` seconds |
-| `type` | `text` | supports `${variable}` substitution |
-| `key` | `key`, `hold_time` | single press, e.g. `Return`, `tab` |
+| `type` | `text` | bulk type, supports `${variable}` |
+| `text_input` | `text`, `delay_per_char` | types one character at a time, ms apart |
+| `key` / `key_press` | `key`, `modifiers`, `hold_time` | e.g. `key: c` + `modifiers: [ctrl]` = Ctrl+C |
 | `hold_key` | `key`, `hold_time` | holds then always releases |
 | `scroll` | `x`, `y`, `amount` | positive scrolls up |
 | `screenshot` | `path` | optional, for verification |
+
+### Building a macro by hand
+
+Recording is only one way to fill the queue. The **Add Action** panel builds
+actions one at a time, and every one of them is fully editable afterwards:
+
+1. **Pick Coordinate** — MazCro hides itself, a crosshair follows your pointer
+   with a live `X:` / `Y:` readout, and a left click captures the point. The
+   fields fill in automatically and the label shows `Selected: (1024, 512)`.
+   **Esc** cancels, and it gives up after 5 seconds so it can never leave an
+   invisible full-screen window behind.
+2. Choose the action type — **Mouse Click**, **Key Press** or **Text Input**.
+   Only the relevant field group is shown.
+3. Fill in the fields, set **Sleep after**, press **+ Add to Queue**.
+4. Fix mistakes in the **Action Queue** table below: double-click a row (or
+   select it and press **Edit selected**) to load it back into the form, then
+   press **Update action**. Per-row **Move up** / **Move down** / **Duplicate** /
+   **Remove** buttons, plus **Insert before selected**, cover reordering.
+
+Tick **Auto-record input** off to work in manual mode — the Record button is
+disabled and the queue is yours to edit without listeners in the way.
+
+### Keys
+
+The **Key** dropdown covers 158 entries: A–Z, 0–9, F1–F24, navigation keys,
+symbols (``!`` ``@`` ``#`` ``$`` ... ``\`` ``|``) and the numpad
+(``num0``–``num9``, ``add``, ``subtract``, ``multiply``, ``divide``,
+``decimal``, ``numlock``). Both ``num_5`` and ``num5`` load and replay — the
+spelling is normalised for you.
+
+Rather than hunting through the list, press **Capture Key**: the button waits
+6 seconds for you to press the combo you actually want, including its
+modifiers. Press Ctrl and J together and the form fills itself in as
+`key: j`, `Ctrl` ticked. A modifier on its own does not finish the capture,
+**Escape** cancels, and timing out leaves the form untouched.
+
+> **Symbols are sent literally.** You chose this, so `!` is stored and replayed
+> as `!` rather than being rewritten into Shift+1. On a US keyboard `!` is not
+> a physical key — it is Shift plus the 1 key — so if nothing appears, capture
+> the combo as Ctrl+1-style instead (e.g. tick Shift with key `1`). A note is
+> written to `~/macro_errors.log` whenever a symbol is sent as a bare press.
+
+### Trigger options
+
+| Option | Behaviour |
+| --- | --- |
+| **Loop** + **Repeat** | Replays the macro N times. **0 = forever**, stopped with **Stop** or the hotkey. |
+| **Interval (s)** | Pause between repeats. |
+| **Hide window while running** | MazCro disappears for the duration and returns when playback ends or is stopped. |
+
+The bottom bar holds **START**, **Stop** and **Activate Hotkey** with the
+current hotkey shown.
+
+### Multiple target windows
+
+Tick several windows in the **target list** (Ctrl+click). The first one sets
+the macro's title pattern; every selection is stored as an accepted target, and
+playback runs if *any* of them is open. Saved as `extra_windows` in the JSON.
 
 ### Timing
 
@@ -41,9 +100,13 @@ the moment you Alt+Tab back to that app.
 
 ### Variables
 
-Define name/value pairs and reference them as `${name}` inside any `type` action.
-Values are stored in the macro, and can be overridden at playback time through a
-prompt dialog.
+Define name/value pairs and reference them as `${name}` inside any `type` or
+`text_input` action. Values are stored in the macro, and can be overridden at
+playback time through a prompt dialog.
+
+If a macro references a `${name}` that is **not** defined, playback refuses to
+start and offers to prompt you for the missing values — rather than typing the
+literal text `${username}` into whatever window is in front of you.
 
 ### Reliability
 
@@ -87,9 +150,11 @@ python -m venv .venv
 3. Perform your actions — every click, keystroke, scroll and mouse move is captured
 4. Press **Esc** or click **Stop**
 
-Modifiers are not recorded separately; they are carried by the key they modify.
-Mouse movement is captured but you can turn it off with the **Record mouse moves**
-checkbox if you only want clicks.
+Modifiers are not recorded separately; they are carried by the key they modify —
+Ctrl+C records as one `key_press` with `key: c` and `modifiers: ["ctrl"]`. A run
+of typed characters is grouped into a single `text_input` action rather than one
+per keystroke. Mouse movement is captured but you can turn it off with the
+**Record mouse moves** checkbox if you only want clicks.
 
 ### Playing it back
 
@@ -134,16 +199,28 @@ them to share or back up.
   "playback_speed": 1.0,
   "variables": { "username": "user@example.com", "password": "secret" },
   "actions": [
-    { "type": "wait", "delay": 0, "duration": 0.5 },
-    { "type": "click", "delay": 0.2, "x": 250, "y": 150, "button": "left", "hold_time": 50 },
-    { "type": "type", "delay": 0.1, "text": "${username}" },
-    { "type": "key", "delay": 0.1, "key": "Return", "hold_time": 50 }
+    { "type": "mouse_click", "delay": 0.3, "x": 512, "y": 256,
+      "button": "left", "hold_time": 50 },
+    { "type": "key_press", "delay": 0.1, "key": "tab",
+      "modifiers": [], "hold_time": 50 },
+    { "type": "text_input", "delay": 0.2, "text": "${username}",
+      "delay_per_char": 50 },
+    { "type": "key_press", "delay": 0.1, "key": "c",
+      "modifiers": ["ctrl"], "hold_time": 50 },
+    { "type": "text_input", "delay": 0.2, "text": "${password}",
+      "delay_per_char": 50 },
+    { "type": "key_press", "delay": 0.5, "key": "return",
+      "modifiers": [], "hold_time": 50 }
   ]
 }
 ```
 
 `delay` is the recorded gap **before** that action, in seconds. Dividing it by the
 speed factor is what makes 2x playback twice as fast.
+
+For hand-written macros, `sleep_before` (in **milliseconds**) is accepted as an
+alias for `delay`, so the schema reads naturally either way. Legacy macros using
+only `click` / `move` / `type` load unchanged.
 
 ### Logging
 
@@ -158,7 +235,8 @@ recent files kept. The in-app log panel mirrors the last 20 lines.
 | `macro_model.py` | `Macro`, `Action`, `Variable`, `WindowTarget` dataclasses |
 | `macro_store.py` | JSON persistence and the rotating log |
 | `recorder.py` | pynput listeners producing `Action` objects |
-| `player.py` | playback thread, timing, validation, watchdog |
+| `player.py` | playback thread, timing, validation, watchdog, looping |
+| `coordinate_picker.py` | full-screen crosshair overlay for picking X/Y |
 | `window_manager.py` | window enumeration, foreground monitor, screen metrics |
 
 Recording, playback, window monitoring and hotkey capture each run on their own
@@ -204,7 +282,11 @@ moment you press Record.
 | Nothing happens on Alt+Tab | Auto-trigger is off, the macro has no actions, or focus never left the target. |
 | Hotkey does nothing | The hotkey only fires while the target window is active. |
 | Playback stops unexpectedly | Check `~/macro_errors.log`; a failing action is logged with a full traceback. |
-| Clicks land in the wrong place | Resolution or window layout changed. Re-record, or loosen the title regex. |
+| Clicks land in the wrong place | Resolution or window layout changed. Re-record, loosen the title regex, or use **Pick Coordinate** to re-aim individual actions. |
+| Coordinate picker closed itself | It auto-cancels after 5 seconds. Press **Pick Coordinate** again and click before the timer runs out. |
+| Keys type but modifiers are ignored | The key is being sent as a plain `type`/`text_input`. Use a **Key Press** action and tick Ctrl/Shift/Alt, or use **Capture Key**. |
+| A symbol key does nothing | Symbols are sent literally. On a US layout `!` needs Shift+1 — use key `1` with Shift ticked. |
+| Loop runs too many times | **Repeat** is the number of full passes; 0 means forever. |
 
 ## Disclaimer
 

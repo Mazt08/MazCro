@@ -21,6 +21,16 @@ from macro_store import log_exception, log_info
 #: Recording every pixel produces enormous macros that are useless on replay.
 MOVE_THRESHOLD = 3
 
+#: Key names treated as modifiers rather than as actions in their own right.
+MODIFIER_NAMES: frozenset[str] = frozenset(
+    {
+        "shift", "shift_l", "shift_r",
+        "ctrl", "ctrl_l", "ctrl_r",
+        "alt", "alt_l", "alt_r",
+        "cmd", "cmd_l", "cmd_r", "win", "winleft", "winright",
+    }
+)
+
 
 class Recorder:
     """Captures mouse and keyboard activity into a list of Actions.
@@ -56,6 +66,13 @@ class Recorder:
         self._last_time = 0.0
         self._last_position = (-1, -1)
         self._held_keys: set[str] = set()
+        #: Printable characters typed since the last non-printable key, used to
+        #: coalesce a burst of typing into a single ``text_input`` action.
+        self._typing_buffer: list[str] = []
+        #: Delay accumulated while the current typing burst was being recorded.
+        self._typing_delay: float = 0.0
+        #: Milliseconds between characters recorded into ``text_input``.
+        self.delay_per_char_ms = 50
 
     # ------------------------------------------------------------ properties
     @property
@@ -92,6 +109,8 @@ class Recorder:
             self._actions.clear()
         self._last_position = (-1, -1)
         self._held_keys.clear()
+        self._typing_buffer.clear()
+        self._typing_delay = 0.0
         self._start_time = time.monotonic()
         self._last_time = self._start_time
         self._running.set()
@@ -120,6 +139,7 @@ class Recorder:
         if not self._running.is_set():
             return self.actions()
 
+        self._flush_typing()
         self._running.clear()
         for listener in (self._mouse_listener, self._keyboard_listener):
             if listener is None:
@@ -174,6 +194,8 @@ class Recorder:
         if abs(x - self._last_position[0]) < MOVE_THRESHOLD and abs(y - self._last_position[1]) < MOVE_THRESHOLD:
             return
         self._last_position = (int(x), int(y))
+        # Moving the pointer is a reliable separator between two runs of typing.
+        self._flush_typing()
         self._append(
             Action(
                 kind="move",
@@ -187,6 +209,8 @@ class Recorder:
     def _on_click(self, x: int, y: int, button: object, pressed: bool) -> None:
         if not self._running.is_set() or not pressed:
             return
+        # Clicking means the user moved to a new place: end any typing burst.
+        self._flush_typing()
         name = getattr(button, "name", str(button))
         # A double click is two clicks; the player reproduces the timing, so
         # record them individually rather than collapsing them.
@@ -206,6 +230,7 @@ class Recorder:
             return
         if dx == 0 and dy == 0:
             return
+        self._flush_typing()
         self._append(
             Action(
                 kind="scroll",
@@ -226,20 +251,50 @@ class Recorder:
         name = self._key_name(key)
         if name == "esc":
             # Escape stops recording rather than being recorded.
+            self._flush_typing()
             self.stop()
             return
-        if name in ("shift", "ctrl", "ctrl_l", "ctrl_r", "alt", "alt_l", "alt_r", "cmd"):
+        if name in MODIFIER_NAMES:
             # Modifiers are captured as part of the key they modify.
             self._held_keys.add(name)
             return
+
+        # Any key other than a plain character ends the current typing burst,
+        # so text is grouped into one text_input action per run of characters.
+        character = getattr(key, "char", None)
+        if character and character.isprintable():
+            self._typing_delay += self._elapsed_since_last()
+            self._typing_buffer.append(character)
+            return
+
+        self._flush_typing()
+        modifiers = sorted(m for m in self._held_keys if m in MODIFIER_NAMES)
         self._append(
             Action(
-                kind="key",
+                kind="key_press",
                 delay=self._elapsed_since_last(),
                 key=name,
+                modifiers=modifiers,
                 hold_time=self.hold_time_ms,
             )
         )
+
+    def _flush_typing(self) -> None:
+        """Emit the pending characters as one ``text_input`` action."""
+        if not self._typing_buffer:
+            self._typing_delay = 0.0
+            return
+        text = "".join(self._typing_buffer)
+        self._typing_buffer.clear()
+        self._append(
+            Action(
+                kind="text_input",
+                delay=self._typing_delay,
+                text=text,
+                delay_per_char=self.delay_per_char_ms,
+            )
+        )
+        self._typing_delay = 0.0
 
     def _on_key_release(self, key: object) -> None:
         # Releases are tracked only to know when a modifier is held down; the
