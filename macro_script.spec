@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['D:/Repositories/Macro App/macro_script.py'],
+    ['macro_script.py'],
     pathex=[],
     binaries=[],
     datas=[],
