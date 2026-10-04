@@ -1,3 +1,5 @@
-pynput==1.7.6
-pyautogui==0.9.53
-pygetwindow==0.0.9
+# Macro Script by Mazt - Python dependencies
+# Install with: pip install -r requirements.txt
+
+pywin32==308
+keyboard==0.13.5
